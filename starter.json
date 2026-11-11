@@ -1,0 +1,21 @@
+{
+  "name": "Pillow Fort War",
+  "genre": "fighting",
+  "dim": "2D",
+  "mode": "Versus",
+  "players": "2–8",
+  "hook": "Build a pillow fort. Then pillow fight for the flag.",
+  "how": "Two teams pile cushions into forts on their side of the living room, then the pillow fight starts: lob pillows over the forts, bonk the other team, grab their flag and carry it home. Get bonked while carrying it and you drop it.",
+  "controls": "WASD to move, mouse to aim and click to throw, click to place cushions; on phones, left thumb moves and drag on the right to aim and throw",
+  "uses": [
+    ["Host-run rules", "The host's browser keeps the forts and the flags; if it leaves, the next player takes over."],
+    ["Live sync", "Every pillow, cushion and kid moves for everyone at once."],
+    ["Bots", "Bots build forts and join the fight until enough people join."],
+    ["Leaderboard", "Pillow points: 5 per flag captured and 1 per bonk."]
+  ],
+  "ideas": [
+    "Add a giant beanbag that bounces pillows back",
+    "Let each kid carry three pillows and pick them up from the floor",
+    "Turn the lights off so you only see near your flashlight"
+  ]
+}

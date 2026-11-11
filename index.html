@@ -1,0 +1,886 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pillow Fort War</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #3b2a3f; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #fff; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 2px 4px #0009; font-weight: 800; }
+  #top { top: max(8px, env(safe-area-inset-top)); left: 0; right: 0; display: flex; justify-content: center; }
+  #score { display: flex; align-items: center; gap: 10px; padding: 6px 14px; border-radius: 14px; background: #00000055; font-size: 20px; }
+  #score i { font-style: normal; font-size: 26px; font-variant-numeric: tabular-nums; }
+  #score small { display: block; font-size: 12px; font-weight: 700; opacity: .9; text-align: center; }
+  #msg { bottom: calc(max(4px, env(safe-area-inset-bottom)) + 24px); left: 16px; right: 16px; text-align: center; font-size: 16px; }
+  #big { inset: 0; display: grid; place-items: center; text-align: center; font-size: min(12vw, 84px); line-height: 1.05; color: #fff3b0; -webkit-text-stroke: 3px #5a2340; padding: 0 12px; }
+  #big small { display: block; font-size: min(5vw, 24px); color: #fff; -webkit-text-stroke: 0; margin-bottom: 8px; }
+  #net { bottom: max(4px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 600; opacity: .85; white-space: nowrap; }
+  [hidden] { display: none !important; }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #1f122877; }
+  .card { box-sizing: border-box; width: min(380px, calc(100vw - 32px)); max-height: 84vh; overflow: auto; padding: 20px; border-radius: 18px; background: #3a2340; border: 2px solid #ffffff33; }
+  .card h2 { margin: 0 0 8px; font-size: 22px; color: #fff3b0; }
+  .card h3 { margin: 14px 0 4px; font-size: 14px; color: #ffb3cf; }
+  .card ol { margin: 0; padding-left: 24px; font-size: 14px; }
+  .card li span { float: right; font-variant-numeric: tabular-nums; }
+  .card li.me { color: #fff3b0; font-weight: 700; }
+  .card p { margin: 10px 0; font-size: 13px; opacity: .85; }
+  button.go { width: 100%; min-height: 48px; border: 0; border-radius: 12px; background: #fff3b0; color: #4a1d3a; font: 800 17px system-ui, sans-serif; cursor: pointer; }
+  #stick { position: fixed; width: 120px; height: 120px; margin: -60px 0 0 -60px; border-radius: 50%; background: #ffffff22; border: 2px solid #ffffff77; pointer-events: none; }
+  #stick i { position: absolute; left: 35px; top: 35px; width: 50px; height: 50px; border-radius: 50%; background: #ffffffaa; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hud" id="top"><div id="score"></div></div>
+<div class="hud" id="msg"></div>
+<div class="hud" id="big"></div>
+<div class="hud" id="net">Connecting…</div>
+<div id="stick" hidden><i></i></div>
+<div id="over" hidden><div class="card">
+  <h2 id="title">Match over</h2><ol id="results"></ol>
+  <h3>Most pillow points</h3><ol id="board"><li>Loading…</li></ol>
+  <p id="next"></p>
+  <button class="go" id="again">Play again</button>
+</div></div>
+<script>
+/* ═══ PILLOW FORT WAR · a Multiplayer Agent starter ════════════════════════════════════
+ * Two teams build pillow forts in a living room, then have a pillow fight: throw pillows
+ * over the forts, grab the other team's flag and carry it home. Versus, 2–8; bots fill.
+ * A match: BUILD (place cushions on your side) → FIGHT (first to CONFIG.capsToWin flags,
+ * or the most when time runs out) → results → a new match.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ teams, timings, cushions, throwing, knockback, bots
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   LIVING ROOM ... the grid, furniture, the two flag bases, what blocks what
+ *   FORTS ......... the cushions: one shared string, one letter per cell
+ *   PILLOWS ....... thrown pillows flying in an arc, forts stopping them, getting hit
+ *   MATCH (HOST) .. phases, teams, seats, building, flags, captures, cushion damage. Only the host writes these.
+ *   BOTS (HOST) ... building their fort, then attackers go for the flag, defenders guard it, everyone throws
+ *   ME ............ moving, throwing, getting bonked. Each player writes only its own.
+ *   DRAW .......... camera, the room, cushions, flags, kids in pajamas, pillows, feathers
+ *   HUD & RESULTS . score, timer, hints, results card, leaderboard
+ *   INPUT ......... WASD + mouse; on touch a move stick (left) and drag-to-aim (right)
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Each player writes its OWN entity: `p` (one packed JSON field: position, speed, aim,
+ *     hearts, state, how many times it has been hit and by whom) about 15 times a second,
+ *     `hb` (heartbeat) once a second, and `n`/`c` (name, nightcap color) once.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last 3s),
+ *     worked out every frame. Only the host writes the shared fields `game` (id, v, phase,
+ *     timers, teams, score, both flags, captures, hits), `fort` (every cushion: one letter
+ *     per cell) and `bots`. A new host adopts all of it and carries on.
+ *   - Building: you send "place" {c} / "take" {c} (a cell); the host checks it's your side
+ *     and your team has cushions left, then writes `fort`. Yours shows at once until then.
+ *   - THROWS ARE DECIDED BY THE VICTIM. A throw is an event "throw" {i, x, y, tx, ty, tm}:
+ *     every screen flies the same pillow. Each player checks pillows against its OWN body;
+ *     if one bonks it, it knocks itself back, loses a heart and sends "hit" {i} so the
+ *     pillow vanishes everywhere. The host does the same for its bots.
+ *   - FORTS AND FLAGS ARE HOST-RUN: the host flies every pillow too and decides which
+ *     cushion it squashes. It also checks where everyone is and decides who took, dropped,
+ *     returned or captured a flag. Getting bonked while carrying the flag drops it.
+ *   - ?attract plays offline with bots only (the preview video is recorded from it).
+ *   - Leaderboard "pillow-points": 5 per flag captured + 1 per bonk, after each match.
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  seats: 6,              // bots fill each team up to seats / 2 kids
+  buildMs: 25000,        // building time
+  fightMs: 150000,       // pillow fight time
+  overMs: 11000,         // results before the next match
+  capsToWin: 3,          // flags captured that win the match
+  teamCushions: 26,      // cushions each team can place
+  cushionHp: 3,          // pillow hits a cushion takes before it flops over
+  speed: 230,            // walking speed, px/s
+  carrySpeed: 185,       // speed while carrying the flag
+  radius: 18,            // a kid's body radius
+  throwRange: 470,       // the farthest a pillow lands, px
+  throwSpeed: 640,       // how fast a pillow travels across the floor, px/s
+  arc: 0.22,             // how high pillows fly: peak height = distance × this
+  throwCd: 0.45,         // seconds between throws
+  lowZ: 46,              // pillows lower than this bonk kids (a high lob only hits where it lands)
+  cushionH: 32,          // ... and enemy cushions lower than this
+  furnH: 40,             // ... and furniture
+  hitR: 28,              // how close a pillow must pass to bonk you
+  knock: 430,            // knockback speed, px/s
+  stun: 0.35,            // after a bonk you can barely move or throw (s)
+  hearts: 3,             // bonks before you flop over
+  flopMs: 1700,          // how long you lie there before running back from your base
+  regenMs: 4000,         // a heart comes back after this long without a bonk
+  flagR: 34,             // how close you must get to touch a flag
+  dropReturnMs: 10000,   // a dropped flag goes home after this long
+  botThrowCd: [0.75, 1.4], // bots wait this long between throws (s)
+  botAim: 50,            // how far off a bot's aim can be (px)
+  board: "pillow-points",
+};
+const TEAMS = [
+  { name: "Blankets", color: "#4d8cff", light: "#bcd6ff", dark: "#2a5bc0", cushion: "#8fb6ff" },
+  { name: "Pajamas", color: "#ff5f8f", light: "#ffc3d6", dark: "#c0335f", cushion: "#ff9cbc" },
+];
+const BOT_NAMES = ["Pip", "Bean", "Lulu", "Ziggy", "Momo", "Taffy", "Nugget", "Poppy", "Sprout", "Button", "Biscuit", "Kiki"];
+const CAPS = ["#ffd23f", "#52d273", "#b47dff", "#ff8c42", "#3de0d0", "#f8fafc", "#a3e635", "#e879f9", "#60a5fa", "#ff6b6b"];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'pillow-fort',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+const memo = new Map();
+/** A shared JSON field, parsed once per change (read-only: never mutate what this returns). */
+function shared(key, fallback) {
+  const raw = S.shared[key], m = memo.get(key);
+  if (m && m.raw === raw) return m.v;
+  const v = parse(raw, fallback); memo.set(key, { raw, v }); return v;
+}
+let net = null, S = { entities: { players: {} }, shared: {} }, dropped = false;
+const seenHb = new Map();
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+let frameAt = 0, wokeAt = -1e9; // my loop's last frame, and when it last woke from a stall (a frozen or background tab)
+/** Never while my own loop is stalled, nor for 0.7s after it wakes: the room moved on without me, so the newer state lands first. */
+const isHost = () => livePlayers()[0] === net.sessionId && performance.now() - frameAt < 1000 && performance.now() - wokeAt > 700;
+const isBot = (id) => id[0] === "@"; // bot ids look like "@3"; sessionIds never have an @
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+// ── LIVING ROOM ─────────────────────────────────────────────────────────────────────
+// A 32 × 20 grid of 50px cells. Furniture fills cells (mirrored left/right so it's fair);
+// Blankets build on the left (columns 0–12), Pajamas on the right (19–31); the middle is open.
+const CELL = 50, GW = 32, GH = 20, WW = GW * CELL, WH = GH * CELL;
+const BASES = [{ x: 2.5 * CELL, y: 10 * CELL }, { x: WW - 2.5 * CELL, y: 10 * CELL }];
+const HALF = [(cx) => cx <= 12, (cx) => cx >= GW - 13];
+const LEFT_FURNITURE = [
+  { t: "shelf", x: 4, y: 0, w: 3, h: 1 }, { t: "chair", x: 7, y: 3, w: 2, h: 2 }, { t: "lamp", x: 11, y: 6, w: 1, h: 1 },
+  { t: "sofa", x: 6, y: 16, w: 4, h: 2 }, { t: "plant", x: 0, y: 0, w: 1, h: 1 }, { t: "plant", x: 0, y: 19, w: 1, h: 1 }, { t: "plant", x: 12, y: 13, w: 1, h: 1 },
+];
+const FURNITURE = [...LEFT_FURNITURE, ...LEFT_FURNITURE.map((f) => ({ ...f, x: GW - f.x - f.w, flip: true })), { t: "tv", x: 14, y: 0, w: 4, h: 1 }, { t: "table", x: 15, y: 9, w: 2, h: 2 }];
+const SOLID = new Uint8Array(GW * GH); // 1 = furniture
+for (const f of FURNITURE) for (let y = f.y; y < f.y + f.h; y++) for (let x = f.x; x < f.x + f.w; x++) SOLID[y * GW + x] = 1;
+const cellOf = (x, y) => { const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL); return cx < 0 || cy < 0 || cx >= GW || cy >= GH ? -1 : cy * GW + cx; };
+const cellCenter = (c) => ({ x: (c % GW) * CELL + CELL / 2, y: Math.floor(c / GW) * CELL + CELL / 2 });
+/** Can `team` put a cushion in cell c? On its side, not on furniture, not crowding a flag. */
+function canBuild(team, c) {
+  if (c < 0 || c >= GW * GH || SOLID[c] || !HALF[team](c % GW)) return false;
+  const p = cellCenter(c); return dist(p, BASES[team]) > 105;
+}
+/** Is the cell blocked for walking (furniture or any cushion)? */
+const blocked = (c, fort) => c < 0 || SOLID[c] === 1 || fort[c] !== ".";
+/** Push a kid (circle) out of every blocked cell around it and keep it in the room. */
+function collide(b, fort) {
+  const r = CONFIG.radius;
+  for (let pass = 0; pass < 2; pass++) {
+    const x0 = Math.floor((b.x - r) / CELL), x1 = Math.floor((b.x + r) / CELL), y0 = Math.floor((b.y - r) / CELL), y1 = Math.floor((b.y + r) / CELL);
+    for (let cy = y0; cy <= y1; cy++) for (let cx = x0; cx <= x1; cx++) {
+      if (cx >= 0 && cy >= 0 && cx < GW && cy < GH && !blocked(cy * GW + cx, fort)) continue;
+      const nx = clamp(b.x, cx * CELL, cx * CELL + CELL), ny = clamp(b.y, cy * CELL, cy * CELL + CELL), dx = b.x - nx, dy = b.y - ny, d = Math.hypot(dx, dy);
+      if (d < r && d > 1e-4) { b.x = nx + (dx / d) * r; b.y = ny + (dy / d) * r; } else if (d <= 1e-4) { b.y += r; }
+    }
+  }
+  b.x = clamp(b.x, r, WW - r); b.y = clamp(b.y, r, WH - r);
+}
+const spawnFor = (team, i) => ({ x: BASES[team].x + (team ? -1 : 1) * (40 + (i % 2) * 30), y: BASES[team].y + ((i % 5) - 2) * 44 });
+
+// ── FORTS ───────────────────────────────────────────────────────────────────────────
+// `fort` = "m<match id>|" + one letter per cell: "." empty; A B C = a Blankets cushion with
+// 3 2 1 hearts; X Y Z = a Pajamas cushion with 3 2 1 hearts. Letters, never digits.
+const FORT_CH = [["C", "B", "A"], ["Z", "Y", "X"]]; // [team][hearts - 1]
+const EMPTY_FORT = ".".repeat(GW * GH);
+const cushionOf = (ch) => { for (let t = 0; t < 2; t++) { const i = FORT_CH[t].indexOf(ch); if (i >= 0) return { team: t, hp: i + 1 }; } return null; };
+/** The fort for this match as an array of letters (the host's own copy while it's host). */
+function fortNow() {
+  const g = game(); if (!g) return EMPTY_FORT;
+  return isHost() && host.fortId === g.id ? host.fort : sharedFort(g);
+}
+/** The fort as state has it (empty if it belongs to another match). */
+function sharedFort(g) {
+  const raw = S.shared.fort; if (typeof raw !== "string") return EMPTY_FORT;
+  const bar = raw.indexOf("|"); return raw.slice(0, bar) === "m" + g.id && raw.length - bar - 1 === GW * GH ? raw.slice(bar + 1) : EMPTY_FORT;
+}
+const teamCount = (fort, team) => { let n = 0; for (const ch of fort) if (FORT_CH[team].includes(ch)) n++; return n; };
+
+// ── PILLOWS ─────────────────────────────────────────────────────────────────────────
+// Every screen flies every pillow from its "throw" event: a straight line across the floor
+// with a height z that rises and falls. Enemy cushions and furniture stop low pillows.
+const pillows = [], feathers = [];
+let pillowSeq = 0;
+function spawnPillow(m) {
+  if (pillows.some((p) => p.i === m.i)) return null;
+  const d = Math.hypot(m.tx - m.x, m.ty - m.y), p = { i: m.i, by: m.by, tm: m.tm, x0: m.x, y0: m.y, tx: m.tx, ty: m.ty, x: m.x, y: m.y, z: 20, t: 0,
+    dur: Math.max(0.12, d / CONFIG.throwSpeed), peak: d * CONFIG.arc, dx: (m.tx - m.x) / (d || 1), dy: (m.ty - m.y) / (d || 1), state: "fly", left: 0, rot: Math.random() * 6 };
+  pillows.push(p); return p;
+}
+function stepPillows(dt, fort) {
+  for (let i = pillows.length - 1; i >= 0; i--) {
+    const p = pillows[i];
+    if (p.state !== "fly") { p.left -= dt; if (p.left <= 0) pillows.splice(i, 1); continue; }
+    p.t += dt; const s = Math.min(1, p.t / p.dur);
+    p.x = p.x0 + (p.tx - p.x0) * s; p.y = p.y0 + (p.ty - p.y0) * s; p.z = 20 * (1 - s) + 4 * p.peak * s * (1 - s); p.rot += dt * 9;
+    const c = cellOf(p.x, p.y), cu = c >= 0 ? cushionOf(fort[c]) : null;
+    const stop = c < 0 || (SOLID[c] && p.z < CONFIG.furnH) || (cu && cu.team !== p.tm && p.z < CONFIG.cushionH);
+    if (stop) { p.state = "gone"; p.left = 0; fluff(p.x, p.y, 10, cu ? TEAMS[cu.team].light : "#ffffff"); if (cu && isHost()) squashCushion(c); sfx("thump"); continue; }
+    if (s >= 1) { p.state = "landed"; p.left = 0.6; fluff(p.x, p.y, 3, "#ffffff"); }
+  }
+}
+function fluff(x, y, n, color) {
+  for (let k = 0; k < n; k++) feathers.push({ x, y, z: rnd(10, 30), vx: rnd(-80, 80), vy: rnd(-80, 80), vz: rnd(30, 120), r: rnd(0, 6), vr: rnd(-6, 6), life: rnd(1, 2.2), color });
+  if (feathers.length > 400) feathers.splice(0, feathers.length - 400);
+}
+/** The victim's side: does a flying enemy pillow bonk body b? Called for me by me, and for each bot by the host. */
+function checkBonks(b, myId, now) {
+  if (b.st === "f") return;
+  for (const p of pillows) {
+    if (p.state !== "fly" || p.tm === b.team || p.z > CONFIG.lowZ || Math.hypot(p.x - b.x, p.y - b.y) > CONFIG.hitR) continue;
+    p.state = "gone"; p.left = 0;
+    b.vx += p.dx * CONFIG.knock; b.vy += p.dy * CONFIG.knock; b.stun = CONFIG.stun; b.hs++; b.by = p.by; b.lastHit = now;
+    b.hp--; if (b.hp <= 0) { b.st = "f"; b.flopUntil = now + CONFIG.flopMs; }
+    const m = { i: p.i, to: myId, by: p.by, x: Math.round(b.x), y: Math.round(b.y), f: b.st === "f" ? 1 : 0 };
+    net.send("hit", m); bonkFx(m);
+  }
+}
+function bonkFx(m) {
+  const p = pillows.find((q) => q.i === m.i); if (p) { p.state = "gone"; p.left = 0; }
+  fluff(m.x, m.y, m.f ? 22 : 12, "#ffffff"); words.push({ x: m.x, y: m.y - 30, text: m.f ? "FLOP!" : ["BONK!", "FWUMP!", "POOF!"][Math.floor(Math.random() * 3)], life: 0.9 });
+  sfx(m.f ? "flop" : "bonk");
+  if (m.to === net.sessionId) local.shake = 8;
+}
+const words = [];
+
+// ── MATCH (HOST) ────────────────────────────────────────────────────────────────────
+const host = { wasHost: false, last: null, bots: new Map(), fort: EMPTY_FORT, fortId: 0, fortDirty: false, fortAt: 0, lastBots: 0, hs: new Map(), bonks: {}, bonkDirty: 0 };
+/** The match as state has it, or the host's own newer write that hasn't come back yet. `v` only goes up. */
+function game() { const g = shared("game", null); return host.last && isHost() && (!g || host.last.v > g.v) ? host.last : g; }
+function writeGame(g) {
+  g = { ...g, v: (game()?.v ?? 0) + 1 }; host.last = g; net.setShared("game", JSON.stringify(g));
+  if (g.id !== local.gid || g.phase !== local.phase) onPhase(g); // the host sees its own change at once
+  return g;
+}
+const teamOf = (g, id) => (isBot(id) ? (host.bots.get(id)?.team ?? (shared("bots", []).find((b) => b.i === id)?.t ?? 0)) : g.tm[id] ?? -1);
+function hostTick(dt, now) {
+  if (!host.wasHost) adopt();
+  let g = game();
+  const t = Date.now();
+  if (!g) g = newMatch(null);
+  g = seatNewcomers(g);
+  if (g.phase === "build" && t >= g.endsAt) g = writeGame({ ...g, phase: "fight", endsAt: t + CONFIG.fightMs });
+  else if (g.phase === "fight") g = fightTick(g, t);
+  else if (g.phase === "over" && t >= g.endsAt) g = newMatch(g);
+  botsTick(dt, g, now);
+  if (host.fortDirty && now - host.fortAt > 120) { host.fortDirty = false; host.fortAt = now; net.setShared("fort", "m" + host.fortId + "|" + host.fort); }
+}
+/** Become host: take over the bots, the fort and the hit counts exactly as state has them. */
+function adopt() {
+  host.wasHost = true; host.bots.clear(); host.hs.clear(); host.bonks = {};
+  const g = shared("game", null);
+  if (g) { host.fort = sharedFort(g); host.fortId = g.id; }
+  for (const b of shared("bots", [])) host.bots.set(b.i, { ...newBody(), id: b.i, name: b.n, cap: b.c, team: b.t, x: b.x, y: b.y, hp: b.hp, st: b.st === "f" ? "f" : "", flopUntil: performance.now() + 800, hs: b.hs, seenHs: b.hs, ...botTraits(b.i) });
+  if (g && g.phase === "build") for (const b of host.bots.values()) planFort(b, g, true); // carry on building (cells already filled are skipped)
+  for (const [id, p] of Object.entries(S.entities.players || {})) { const q = parse(p.p, null); if (q) host.hs.set(id, q.hs); }
+}
+const botTraits = (id) => ({ role: (+id.slice(1)) % 3 === 0 ? "defend" : "attack", cd: rnd(0.5, 1.5), path: [], pathAt: 0, aimErr: rnd(0.4, 1), wander: rnd(-1, 1), buildAt: 0 });
+/** Teams: a newcomer joins the side with fewer people and takes a bot's place. */
+function seatNewcomers(g) {
+  const live = livePlayers(), fresh = live.filter((id) => g.tm[id] === undefined);
+  if (!fresh.length) return g;
+  const tm = { ...g.tm };
+  for (const id of fresh) {
+    const humans = [0, 1].map((t) => live.filter((x) => tm[x] === t).length), all = [0, 1].map((t) => humans[t] + [...host.bots.values()].filter((b) => b.team === t).length);
+    const team = humans[0] !== humans[1] ? (humans[0] < humans[1] ? 0 : 1) : all[0] <= all[1] ? 0 : 1;
+    tm[id] = team;
+  }
+  syncBots(tm, live);
+  return writeGame({ ...g, tm, names: { ...g.names, ...Object.fromEntries(fresh.map((id) => [id, [nameOf(id), capOf(id)]])) } });
+}
+/** Bots fill each team up to the bigger of seats / 2 and the biggest human team. */
+function syncBots(tm, live) {
+  const humans = [0, 1].map((t) => live.filter((id) => tm[id] === t).length), size = Math.max(Math.floor(CONFIG.seats / 2), ...humans);
+  for (let t = 0; t < 2; t++) {
+    const mine = [...host.bots.values()].filter((b) => b.team === t), want = Math.max(0, size - humans[t]);
+    for (let k = mine.length; k > want; k--) host.bots.delete(mine[k - 1].id);
+    for (let k = mine.length, i = 1; k < want && i < 64; i++) if (!host.bots.has("@" + i)) {
+      const used = new Set([...live.map(capOf), ...[...host.bots.values()].map((b) => b.cap)]), id = "@" + i;
+      host.bots.set(id, { ...newBody(), id, name: BOT_NAMES[(i - 1) % BOT_NAMES.length], cap: CAPS.find((c) => !used.has(c)) || CAPS[i % CAPS.length], team: t, ...botTraits(id) });
+      Object.assign(host.bots.get(id), spawnFor(t, i)); k++;
+    }
+  }
+}
+/** A new match: same teams (rebalanced if lopsided), empty forts, flags home, BUILD. */
+function newMatch(prev) {
+  const live = livePlayers(), tm = {}, t = Date.now();
+  const order = [...live].sort((a, b) => (prev?.tm[a] ?? 9) - (prev?.tm[b] ?? 9));
+  for (const id of order) { const n = [0, 1].map((k) => Object.values(tm).filter((x) => x === k).length), keep = prev?.tm[id]; tm[id] = keep !== undefined && n[keep] <= n[1 - keep] ? keep : n[0] <= n[1] ? 0 : 1; }
+  syncBots(tm, live);
+  host.fort = EMPTY_FORT; host.fortId = (prev?.id || 0) + 1; host.fortDirty = true; host.bonks = {};
+  const names = Object.fromEntries([...live].map((id) => [id, [nameOf(id), capOf(id)]]));
+  const g = writeGame({ id: (prev?.id || 0) + 1, phase: "build", endsAt: t + CONFIG.buildMs, tm, names, score: [0, 0], caps: {}, bk: {}, win: -1,
+    flags: [{ s: "home" }, { s: "home" }] });
+  let i = 0; for (const b of host.bots.values()) { Object.assign(b, newBody(), spawnFor(b.team, i++)); planFort(b, g); }
+  return g;
+}
+/** Fight: count bonks, run both flags, end the match on enough captures or the clock. */
+function fightTick(g, t) {
+  const kids = everyone(g), live = livePlayers();
+  for (const k of kids) if (!isBot(k.id)) { // a player's hit counter went up: credit whoever bonked it
+    const before = host.hs.get(k.id); if (before !== undefined && k.hs > before && k.by) host.bonks[k.by] = (host.bonks[k.by] || 0) + (k.hs - before); host.hs.set(k.id, k.hs);
+  }
+  let flags = g.flags.map((f) => ({ ...f })), score = [...g.score], caps = { ...g.caps }, changed = false;
+  for (let ti = 0; ti < 2; ti++) {
+    const f = flags[ti];
+    if (f.s === "held") {
+      const c = kids.find((k) => k.id === f.by);
+      if (!c || c.st === "f" || c.hs !== f.hs || (!isBot(c.id) && !live.includes(c.id))) { flags[ti] = { s: "down", x: Math.round(c ? c.x : BASES[ti].x), y: Math.round(c ? c.y : BASES[ti].y), at: t }; changed = true; sendFx("drop", c || BASES[ti]); }
+      else if (dist(c, BASES[1 - ti]) < CONFIG.flagR + 20) { score[1 - ti]++; caps[c.id] = (caps[c.id] || 0) + 1; flags[ti] = { s: "home" }; changed = true; sendFx("cap", c); }
+      continue;
+    }
+    if (f.s === "down" && t - f.at > CONFIG.dropReturnMs) { flags[ti] = { s: "home" }; changed = true; continue; }
+    const at = f.s === "home" ? BASES[ti] : f;
+    const k = kids.find((o) => o.st !== "f" && dist(o, at) < CONFIG.flagR + CONFIG.radius && (o.team !== ti || f.s === "down"));
+    if (k && k.team !== ti && !flags.some((o) => o.s === "held" && o.by === k.id)) { flags[ti] = { s: "held", by: k.id, hs: k.hs }; changed = true; sendFx("grab", k); }
+    else if (k && k.team === ti) { flags[ti] = { s: "home" }; changed = true; sendFx("back", k); }
+  }
+  const bkChanged = JSON.stringify(host.bonks) !== JSON.stringify(g.bk) && performance.now() - host.bonkDirty > 1000;
+  if (changed || bkChanged) { host.bonkDirty = performance.now(); g = writeGame({ ...g, flags, score, caps, bk: { ...host.bonks } }); }
+  const won = score.findIndex((s) => s >= CONFIG.capsToWin);
+  if (won >= 0 || t >= g.endsAt) g = writeGame({ ...g, phase: "over", endsAt: t + CONFIG.overMs, win: won >= 0 ? won : score[0] === score[1] ? -1 : score[0] > score[1] ? 0 : 1, bk: { ...host.bonks } });
+  return g;
+}
+/** A flag moment everyone hears about (the flag itself is already in `game`). */
+function sendFx(kind, at) { const m = { k: kind, x: Math.round(at.x), y: Math.round(at.y) }; net.send("flag", m); flagFx(m); }
+/** "place" / "take" from a builder: on its side, budget left, during BUILD. */
+function applyBuild(from, m) {
+  const g = game(); if (!g || g.phase !== "build" || !m) return;
+  const team = teamOf(g, from), c = +m.c; if (team < 0 || !(c >= 0 && c < GW * GH)) return;
+  const fort = host.fort.split("");
+  if (m.k === "take") { if (FORT_CH[team].includes(fort[c])) fort[c] = "."; else return; }
+  else { if (!canBuild(team, c) || fort[c] !== "." || teamCount(host.fort, team) >= CONFIG.teamCushions) return; if (everyone(g).some((k) => cellOf(k.x, k.y) === c)) return; fort[c] = FORT_CH[team][CONFIG.cushionHp - 1]; }
+  host.fort = fort.join(""); host.fortDirty = true;
+}
+function squashCushion(c) {
+  const cu = cushionOf(host.fort[c]); if (!cu) return;
+  const fort = host.fort.split(""); fort[c] = cu.hp > 1 ? FORT_CH[cu.team][cu.hp - 2] : "."; host.fort = fort.join(""); host.fortDirty = true;
+}
+
+// ── BOTS (HOST) ─────────────────────────────────────────────────────────────────────
+const newBody = () => ({ x: 0, y: 0, vx: 0, vy: 0, aim: 0, hp: CONFIG.hearts, st: "", stun: 0, flopUntil: 0, hs: 0, seenHs: 0, by: "", lastHit: 0 }); // a bot's `team` stays as it was
+/** The cells a bot wants to fill: a wall in front of its flag with gaps, plus a few cushions of cover further out. */
+function planFort(b, g, resume) {
+  const cells = [], mir = (cx) => (b.team ? GW - 1 - cx : cx);
+  for (let y = 5; y <= 15; y++) if (y !== 8 && y !== 12) cells.push(y * GW + mir(5));
+  for (const y of [5, 15]) for (const x of [3, 4]) cells.push(y * GW + mir(x));
+  for (let k = 0; k < 10; k++) cells.push(Math.floor(rnd(2, 18)) * GW + mir(Math.floor(rnd(7, 12))));
+  b.build = cells.sort(() => Math.random() - 0.5).sort((a, c) => (Math.abs((a % GW) - mir(5)) > 1) - (Math.abs((c % GW) - mir(5)) > 1)); // the wall first
+  b.buildAt = performance.now() + rnd(800, 2500);
+  if (resume) b.build = b.build.filter((c) => host.fort[c] === ".");
+  if (ATTRACT && !resume) for (let k = 0; k < 9 && b.build.length; k++) applyBuild(b.id, { k: "place", c: b.build.shift() });
+}
+function botsTick(dt, g, now) {
+  const kids = everyone(g), fort = host.fort;
+  for (const b of host.bots.values()) {
+    if (g.phase === "build") { // stand by the flag and build
+      if (b.build && b.build.length && now > b.buildAt) { b.buildAt = now + CONFIG.buildMs * 0.55 / 12 * rnd(0.6, 1.4); applyBuild(b.id, { k: "place", c: b.build.shift() }); }
+      continue;
+    }
+    if (g.phase !== "fight") { b.vx *= 0.9; b.vy *= 0.9; continue; }
+    checkBonks(b, b.id, now);
+    if (b.hs > (b.seenHs || 0)) { const by = b.by; if (by) host.bonks[by] = (host.bonks[by] || 0) + (b.hs - (b.seenHs || 0)); b.seenHs = b.hs; }
+    const inp = botBrain(b, g, kids, now);
+    stepKid(b, inp, dt, now, fort, g);
+    if (inp.throwAt) throwPillow(b, b.id, inp.throwAt);
+  }
+  if (now - host.lastBots > 66) { host.lastBots = now; net.setShared("bots", JSON.stringify(botList())); }
+}
+/** Where a team's flag is right now (at home, on the floor, or on a carrier's back). */
+function flagAt(g, team, kids) {
+  const f = g.flags[team];
+  if (f.s === "held") { const c = kids.find((k) => k.id === f.by); return c ? { x: c.x, y: c.y } : BASES[team]; }
+  return f.s === "down" ? { x: f.x, y: f.y } : BASES[team];
+}
+/** A bot's move: carry the flag home, chase whoever has ours, attackers go for theirs, defenders guard; throw at the nearest enemy in range. */
+function botBrain(b, g, kids, now) {
+  if (b.st === "f") return { mx: 0, my: 0 };
+  const enemy = 1 - b.team, fl = g.flags, carrying = fl[enemy].s === "held" && fl[enemy].by === b.id;
+  let goal;
+  if (carrying) goal = BASES[b.team];
+  else if (fl[b.team].s === "held") goal = flagAt(g, b.team, kids);
+  else if (fl[b.team].s === "down" && (b.role === "defend" || dist(b, fl[b.team]) < 400)) goal = fl[b.team];
+  else if (b.role === "defend") goal = { x: BASES[b.team].x + (b.team ? -1 : 1) * 190, y: BASES[b.team].y + b.wander * 160 + Math.sin(now / 1300 + b.wander * 5) * 60 };
+  else if (fl[enemy].s === "held") goal = { x: WW / 2 + (b.team ? 1 : -1) * 120, y: WH / 2 + b.wander * 250 };
+  else goal = flagAt(g, enemy, kids);
+  // walk: straight if nothing's in the way, else follow a grid path (recomputed a few times a second)
+  if (now > b.pathAt) { b.pathAt = now + 350; b.path = findPath(cellOf(b.x, b.y), cellOf(goal.x, goal.y), host.fort); }
+  let tx = goal.x, ty = goal.y;
+  while (b.path.length > 1 && dist(cellCenter(b.path[0]), b) < CELL * 0.7) b.path.shift();
+  if (b.path.length > 1) { const w = cellCenter(b.path[Math.min(1, b.path.length - 1)]); tx = w.x; ty = w.y; }
+  const dx = tx - b.x, dy = ty - b.y, d = Math.hypot(dx, dy) || 1, slow = d < 20 ? d / 20 : 1;
+  const out = { mx: (dx / d) * slow, my: (dy / d) * slow };
+  // throw at the nearest enemy in range, leading them a little
+  const foes = kids.filter((k) => k.team !== b.team && k.st !== "f").map((k) => [k, dist(k, b)]).filter(([, d2]) => d2 < CONFIG.throwRange * 0.9).sort((a, c) => a[1] - c[1]);
+  if (foes.length && now > (b.nextThrow || 0)) {
+    const [k, d2] = foes[0], lead = d2 / CONFIG.throwSpeed, err = CONFIG.botAim * b.aimErr;
+    out.throwAt = { x: k.x + (k.vx || 0) * lead + rnd(-err, err), y: k.y + (k.vy || 0) * lead + rnd(-err, err) };
+    b.nextThrow = now + rnd(...CONFIG.botThrowCd) * 1000;
+  }
+  return out;
+}
+/** Breadth-first path on the grid from cell a to cell b around furniture and cushions (cells, start first). */
+function findPath(a, goal, fort) {
+  if (a < 0 || goal < 0) return [];
+  const prev = new Int16Array(GW * GH).fill(-1), q = [a]; prev[a] = a;
+  for (let qi = 0; qi < q.length; qi++) {
+    const c = q[qi]; if (c === goal) break;
+    const x = c % GW, y = (c - x) / GW;
+    for (const [nx, ny] of [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]]) {
+      if (nx < 0 || ny < 0 || nx >= GW || ny >= GH) continue;
+      const n = ny * GW + nx; if (prev[n] >= 0 || (blocked(n, fort) && n !== goal)) continue;
+      prev[n] = c; q.push(n);
+    }
+  }
+  if (prev[goal] < 0) return [];
+  const path = []; for (let c = goal; c !== a; c = prev[c]) path.push(c); path.push(a);
+  return path.reverse();
+}
+function botList() {
+  if (!isHost()) return shared("bots", []);
+  const r = Math.round;
+  return [...host.bots.values()].map((b) => ({ i: b.id, n: b.name, c: b.cap, t: b.team, x: r(b.x), y: r(b.y), vx: r(b.vx), vy: r(b.vy), a: +b.aim.toFixed(2), hp: b.hp, st: b.st, hs: b.hs }));
+}
+
+// ── ME ──────────────────────────────────────────────────────────────────────────────
+let myName = "", myCap = CAPS[0]; // nightcap color: the first one nobody has
+try { myName = localStorage.getItem("mpa-name") || ""; } catch {}
+if (!myName) myName = ["Sleepy", "Fluffy", "Snuggly", "Cozy", "Yawny", "Dreamy"][Math.floor(Math.random() * 6)] + " " + ["Bear", "Bunny", "Owl", "Kitten", "Panda"][Math.floor(Math.random() * 5)];
+const me = { ...newBody(), team: 0, lastSend: 0, lastJson: "", pending: new Map(), auto: { ...botTraits("@2"), path: [] } };
+const local = { gid: 0, phase: "", shake: 0, bigUntil: 0, big: "" };
+const nameOf = (id) => (id === net.sessionId ? myName : isBot(id) ? host.bots.get(id)?.name || "Bot" : S.entities.players[id]?.n || "Player");
+const capOf = (id) => (id === net.sessionId ? myCap : isBot(id) ? host.bots.get(id)?.cap || "#ccc" : S.entities.players[id]?.c || "#ccc");
+const remotes = new Map();
+function remoteOf(id) {
+  const raw = S.entities.players[id]?.p; if (typeof raw !== "string") return null;
+  let r = remotes.get(id);
+  if (!r || r.raw !== raw) { const p = parse(raw, null); if (!p) return null; r = { raw, p, at: performance.now() }; remotes.set(id, r); }
+  return r;
+}
+let botsSeen = { raw: "", at: 0 };
+/** Every kid on a team: me (live), the bots (live on the host, else the snapshot moved on by its speed), other players (their `p`). */
+function everyone(g) {
+  const out = [], pnow = performance.now(), live = livePlayers();
+  const myTeam = g.tm[net.sessionId];
+  if (myTeam !== undefined) out.push({ id: net.sessionId, team: myTeam, x: me.x, y: me.y, vx: me.vx, vy: me.vy, aim: me.aim, hp: me.hp, st: me.st, hs: me.hs, by: me.by, stun: me.stun });
+  if (isHost()) for (const b of host.bots.values()) out.push({ id: b.id, team: b.team, x: b.x, y: b.y, vx: b.vx, vy: b.vy, aim: b.aim, hp: b.hp, st: b.st, hs: b.hs, by: b.by, stun: b.stun });
+  else { const age = Math.min(0.12, (pnow - botsSeen.at) / 1000); for (const b of shared("bots", [])) out.push({ id: b.i, team: b.t, x: b.x + b.vx * age, y: b.y + b.vy * age, vx: b.vx, vy: b.vy, aim: b.a, hp: b.hp, st: b.st, hs: b.hs }); }
+  for (const id of live) {
+    if (id === net.sessionId || g.tm[id] === undefined) continue;
+    const r = remoteOf(id); if (!r || r.p.m !== g.id) continue;
+    const age = Math.min(0.12, (pnow - r.at) / 1000), p = r.p;
+    out.push({ id, team: g.tm[id], x: p.x + p.vx * age, y: p.y + p.vy * age, vx: p.vx, vy: p.vy, aim: p.a, hp: p.hp, st: p.st, hs: p.hs, by: p.by });
+  }
+  return out;
+}
+/** A new match or phase seen in state: everyone back to their base. */
+function onPhase(g) {
+  const newMatchSeen = g.id !== local.gid;
+  local.gid = g.id; local.phase = g.phase;
+  const team = g.tm[net.sessionId] ?? 0, mates = Object.keys(g.tm).filter((id) => g.tm[id] === team).sort();
+  if (newMatchSeen || g.phase === "fight") { Object.assign(me, newBody(), spawnFor(team, Math.max(0, mates.indexOf(net.sessionId)) + 3)); pillows.length = 0; me.pending.clear(); }
+  if (newMatchSeen) me.auto.build = undefined;
+  if (g.phase === "build") bigText(`<small>Build your fort on your side!</small>BUILD`, 2200);
+  if (g.phase === "fight") { bigText(`<small>Grab their flag, bring it home</small>PILLOW FIGHT!`, 2200); sfx("go"); }
+  if (g.phase === "over") { $("over").hidden = true; local.overAt = performance.now(); sfx(g.win === team ? "win" : "flop"); }
+  if (g.phase !== "over") $("over").hidden = true;
+}
+/** One kid's movement step (mine, and each bot's on the host). */
+function stepKid(b, inp, dt, now, fort, g) {
+  if (b.st === "f") { if (now > b.flopUntil) { Object.assign(b, { st: "", hp: CONFIG.hearts, vx: 0, vy: 0 }, spawnFor(b.team, Math.floor(Math.random() * 5))); } else { b.vx *= Math.exp(-6 * dt); b.vy *= Math.exp(-6 * dt); b.x += b.vx * dt; b.y += b.vy * dt; collide(b, fort); return; } }
+  b.stun = Math.max(0, b.stun - dt);
+  if (b.hp < CONFIG.hearts && now - b.lastHit > CONFIG.regenMs) { b.hp++; b.lastHit = now; }
+  let mx = inp.mx || 0, my = inp.my || 0; const len = Math.hypot(mx, my); if (len > 1) { mx /= len; my /= len; }
+  const carrying = g.flags.some((f) => f.s === "held" && f.by === (b.id || net.sessionId)), sp = (carrying ? CONFIG.carrySpeed : CONFIG.speed) * (b.stun > 0 ? 0.25 : 1);
+  const k = Math.min(1, 10 * dt); b.vx += (mx * sp - b.vx) * k; b.vy += (my * sp - b.vy) * k;
+  b.x += b.vx * dt; b.y += b.vy * dt; collide(b, fort);
+  if (len > 0.2 && !inp.aimAt) b.aim = Math.atan2(my, mx);
+  if (inp.aimAt) b.aim = Math.atan2(inp.aimAt.y - b.y, inp.aimAt.x - b.x);
+}
+/** Throw toward a world point (capped at the range). Every screen flies it from the event. */
+function throwPillow(b, id, at) {
+  if (b.st === "f" || b.stun > 0 || performance.now() < (b.throwReady || 0)) return false;
+  b.throwReady = performance.now() + CONFIG.throwCd * 1000;
+  const dx = at.x - b.x, dy = at.y - b.y, d = Math.hypot(dx, dy) || 1, r = Math.min(d, CONFIG.throwRange);
+  b.aim = Math.atan2(dy, dx);
+  const m = { i: id + ":" + ++pillowSeq, by: id, tm: b.team, x: Math.round(b.x + (dx / d) * 22), y: Math.round(b.y + (dy / d) * 22), tx: Math.round(b.x + (dx / d) * r), ty: Math.round(b.y + (dy / d) * r) };
+  net.send("throw", m); spawnPillow(m); sfx("whoosh"); return true;
+}
+function myTick(dt, g, now) {
+  const team = g.tm[net.sessionId]; if (team === undefined) { publish(g); return; }
+  me.team = team;
+  const fort = fortNow();
+  if (g.phase === "fight") {
+    checkBonks(me, net.sessionId, now);
+    let inp;
+    if (ATTRACT) { Object.assign(me.auto, { id: net.sessionId, team, x: me.x, y: me.y, vx: me.vx, vy: me.vy, st: me.st }); inp = botBrain(me.auto, g, everyone(g), now); } // the preview's autopilot
+    else inp = readInput();
+    stepKid(me, inp, dt, now, fort, g);
+    if (inp.throwAt) throwPillow(me, net.sessionId, inp.throwAt);
+  } else if (g.phase === "build" && ATTRACT && me.auto.build === undefined) planFort(Object.assign(me.auto, { id: net.sessionId, team }), g);
+  else if (g.phase === "build" && ATTRACT && me.auto.build.length && now > me.auto.buildAt) { me.auto.buildAt = now + 600; requestBuild("place", me.auto.build.shift()); }
+  publish(g);
+}
+function publish(g) {
+  const now = performance.now();
+  if (now - me.lastSend < 66) return; // ~15/s
+  me.lastSend = now;
+  const r = Math.round, json = JSON.stringify({ m: g.id, x: r(me.x), y: r(me.y), vx: r(me.vx), vy: r(me.vy), a: +me.aim.toFixed(2), hp: me.hp, st: me.st, hs: me.hs, by: me.by });
+  if (json !== me.lastJson) { me.lastJson = json; net.me.set("p", json); }
+}
+/** Ask the host to place/take a cushion (the host applies its own at once). Shows as pending until the fort comes back. */
+function requestBuild(k, c) {
+  const g = game(); if (!g || g.phase !== "build") return;
+  me.pending.set(c, { k, at: performance.now() });
+  if (isHost()) applyBuild(net.sessionId, { k, c }); else net.send("build", { k, c });
+  sfx(k === "place" ? "place" : "take");
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────────────────
+const cv = $("game"), ctx = cv.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+function fit() { DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight; cv.width = W * DPR; cv.height = H * DPR; }
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+const cam = { x: WW / 2, y: WH / 2, z: 0.6 };
+function rr(c, x, y, w, h, r) { c.beginPath(); c.roundRect(x, y, w, h, r); }
+// the room never changes: draw it once into its own canvas
+const ROOM_SCALE = 1.5, room = document.createElement("canvas");
+room.width = WW * ROOM_SCALE; room.height = WH * ROOM_SCALE;
+(function paintRoom() {
+  const c = room.getContext("2d"); c.scale(ROOM_SCALE, ROOM_SCALE);
+  for (let y = 0; y < WH; y += 25) { c.fillStyle = ["#c99a6b", "#c39265", "#cfa172", "#c69768"][(y / 25) % 4]; c.fillRect(0, y, WW, 25); c.fillStyle = "#a87a4f"; c.fillRect(0, y + 24, WW, 1); for (let x = ((y * 7) % 160); x < WW; x += 160 + (y % 3) * 30) c.fillRect(x, y, 1, 25); }
+  // the rug in the middle and two team rugs at the bases
+  rr(c, WW / 2 - 260, WH / 2 - 210, 520, 420, 40); c.fillStyle = "#e7c26b"; c.fill(); rr(c, WW / 2 - 236, WH / 2 - 186, 472, 372, 30); c.fillStyle = "#d9a94a"; c.fill();
+  c.strokeStyle = "#f5e2a8"; c.lineWidth = 6; c.setLineDash([16, 12]); rr(c, WW / 2 - 210, WH / 2 - 160, 420, 320, 24); c.stroke(); c.setLineDash([]);
+  for (let t = 0; t < 2; t++) { c.beginPath(); c.arc(BASES[t].x, BASES[t].y, 92, 0, 7); c.fillStyle = TEAMS[t].light + "aa"; c.fill(); c.lineWidth = 5; c.strokeStyle = TEAMS[t].color; c.setLineDash([12, 10]); c.stroke(); c.setLineDash([]); }
+  c.strokeStyle = "#ffffff55"; c.lineWidth = 4; c.setLineDash([20, 16]); c.beginPath(); c.moveTo(WW / 2, 0); c.lineTo(WW / 2, WH); c.stroke(); c.setLineDash([]);
+  for (const f of FURNITURE) paintFurniture(c, f);
+})();
+function paintFurniture(c, f) {
+  const x = f.x * CELL, y = f.y * CELL, w = f.w * CELL, h = f.h * CELL;
+  c.fillStyle = "#00000033"; rr(c, x + 6, y + 8, w - 4, h - 4, 12); c.fill(); // soft shadow
+  if (f.t === "sofa") { rr(c, x + 2, y + 2, w - 4, h - 4, 18); c.fillStyle = "#7b5ea7"; c.fill(); rr(c, x + 12, y + 30, w - 24, h - 42, 12); c.fillStyle = "#9479c4"; c.fill(); for (let i = 1; i < 4; i++) { c.fillStyle = "#6c5196"; c.fillRect(x + 12 + i * (w - 24) / 4 - 1, y + 32, 2, h - 46); } rr(c, x + 2, y + 2, w - 4, 26, 14); c.fillStyle = "#6c5196"; c.fill(); }
+  if (f.t === "chair") { rr(c, x + 4, y + 4, w - 8, h - 8, 18); c.fillStyle = "#3f9b8a"; c.fill(); rr(c, x + 18, y + 26, w - 36, h - 40, 12); c.fillStyle = "#5bbfa9"; c.fill(); }
+  if (f.t === "table") { rr(c, x + 4, y + 4, w - 8, h - 8, 14); c.fillStyle = "#8a5a3a"; c.fill(); rr(c, x + 10, y + 10, w - 20, h - 20, 10); c.fillStyle = "#a06c47"; c.fill(); c.fillStyle = "#fff"; c.beginPath(); c.arc(x + 32, y + 36, 9, 0, 7); c.fill(); c.fillStyle = "#6b3f2a"; c.beginPath(); c.arc(x + 32, y + 36, 6, 0, 7); c.fill(); c.fillStyle = "#ffd23f"; rr(c, x + 52, y + 54, 30, 22, 4); c.fill(); }
+  if (f.t === "tv") { rr(c, x + 4, y + 4, w - 8, h - 8, 8); c.fillStyle = "#5b3d2e"; c.fill(); rr(c, x + 30, y + 10, w - 60, 16, 4); c.fillStyle = "#1c1c28"; c.fill(); c.fillStyle = "#6fd0ff"; c.fillRect(x + 34, y + 12, w - 68, 4); }
+  if (f.t === "shelf") { rr(c, x + 2, y + 2, w - 4, h - 6, 6); c.fillStyle = "#8a5a3a"; c.fill(); const cols = ["#d9534f", "#5b7bd5", "#f2c14e", "#6cc58a", "#a77dff"]; for (let i = 0; i < 14; i++) { c.fillStyle = cols[i % 5]; c.fillRect(x + 8 + i * 10, y + 8, 8, 26); } }
+  if (f.t === "lamp") { c.fillStyle = "#fff4c2"; c.beginPath(); c.arc(x + 25, y + 25, 21, 0, 7); c.fill(); c.strokeStyle = "#e0b850"; c.lineWidth = 4; c.stroke(); c.fillStyle = "#e0b850"; c.beginPath(); c.arc(x + 25, y + 25, 5, 0, 7); c.fill(); }
+  if (f.t === "plant") { c.fillStyle = "#c8643c"; c.beginPath(); c.arc(x + 25, y + 25, 15, 0, 7); c.fill(); for (let i = 0; i < 7; i++) { const a = i * 0.9; c.fillStyle = i % 2 ? "#4fa64a" : "#3c8a3a"; c.beginPath(); c.ellipse(x + 25 + Math.cos(a) * 11, y + 25 + Math.sin(a) * 11, 13, 7, a, 0, 7); c.fill(); } }
+}
+function drawCushion(c, x, y, team, hp, pending) {
+  const T = TEAMS[team], s = 0.72 + hp * 0.09, w = CELL * s, cx = x + CELL / 2, cy = y + CELL / 2;
+  c.globalAlpha = pending ? 0.5 : 1;
+  c.fillStyle = "#00000030"; rr(c, cx - w / 2 + 3, cy - w / 2 + 5, w, w, 12); c.fill();
+  c.fillStyle = hp >= 3 ? T.cushion : hp === 2 ? T.light : "#efe6ea"; rr(c, cx - w / 2, cy - w / 2, w, w, 12); c.fill();
+  c.strokeStyle = T.dark; c.lineWidth = 2.5; c.stroke();
+  c.strokeStyle = T.dark + "66"; c.lineWidth = 2; c.beginPath(); c.moveTo(cx - w / 2 + 6, cy); c.quadraticCurveTo(cx, cy - 3, cx + w / 2 - 6, cy); c.stroke();
+  c.fillStyle = T.dark; c.beginPath(); c.arc(cx, cy, 3, 0, 7); c.fill();
+  c.globalAlpha = 1;
+}
+function drawFlag(c, x, y, team, t, carried) {
+  const T = TEAMS[team], wave = Math.sin(t * 6) * 4;
+  c.fillStyle = "#00000030"; c.beginPath(); c.ellipse(x + 4, y + 4, 12, 6, 0, 0, 7); c.fill();
+  c.strokeStyle = "#5b3d2e"; c.lineWidth = 4; c.beginPath(); c.moveTo(x, y); c.lineTo(x, y - (carried ? 52 : 62)); c.stroke();
+  const top = y - (carried ? 52 : 62);
+  c.fillStyle = T.color; c.beginPath(); c.moveTo(x, top); c.quadraticCurveTo(x + 22, top + 4 + wave, x + 40, top + 12 + wave); c.quadraticCurveTo(x + 20, top + 18 - wave, x, top + 26); c.fill();
+  c.fillStyle = "#fff"; c.beginPath(); c.arc(x + 15, top + 12, 5, 0, 7); c.fill();
+}
+function drawKid(c, k, t, mine, name, cap, carrying) {
+  const T = TEAMS[k.team], flop = k.st === "f", wob = k.stun > 0 || flop ? Math.sin(t * 30) * 0.15 : 0, r = CONFIG.radius;
+  c.save(); c.translate(k.x, k.y);
+  c.fillStyle = "#00000035"; c.beginPath(); c.ellipse(3, 6, r + 2, r * 0.75, 0, 0, 7); c.fill();
+  if (carrying !== undefined) drawFlag(c, -10, -6, carrying, t, true);
+  c.rotate(flop ? 1.4 : wob);
+  if (mine) { c.strokeStyle = "#fff3b0"; c.lineWidth = 3; c.beginPath(); c.arc(0, 0, r + 6, 0, 7); c.stroke(); }
+  // pajamas with stripes, then the head on top
+  c.fillStyle = T.color; c.beginPath(); c.ellipse(0, 4, r, r * (flop ? 1.3 : 0.95), 0, 0, 7); c.fill();
+  c.strokeStyle = T.light; c.lineWidth = 3; for (const sx of [-8, 0, 8]) { c.beginPath(); c.moveTo(sx, -8); c.lineTo(sx, 16); c.stroke(); }
+  c.fillStyle = "#ffd9b8"; c.beginPath(); c.arc(0, -6, 12, 0, 7); c.fill();
+  // nightcap in this kid's own color, flopping behind
+  c.fillStyle = cap; c.beginPath(); c.moveTo(-11, -10); c.quadraticCurveTo(0, -24, 11, -10); c.quadraticCurveTo(16, -26, 24 + Math.sin(t * 5) * 3, -20); c.lineTo(14, -6); c.fill();
+  c.fillStyle = "#fff"; c.beginPath(); c.arc(24 + Math.sin(t * 5) * 3, -20, 4, 0, 7); c.fill();
+  c.fillStyle = "#3a2030";
+  if (flop) { for (const sx of [-4, 4]) { c.fillRect(sx - 2, -8, 4, 1.5); } } else { c.beginPath(); c.arc(-4, -5, 1.8, 0, 7); c.arc(4, -5, 1.8, 0, 7); c.fill(); }
+  c.restore();
+  // the pillow in hand, held out the way they aim
+  if (!flop) { const a = k.aim || 0, hx = k.x + Math.cos(a) * 22, hy = k.y + Math.sin(a) * 22; c.save(); c.translate(hx, hy); c.rotate(a); c.fillStyle = "#ffffff"; rr(c, -9, -12, 18, 24, 7); c.fill(); c.strokeStyle = "#d8cfe0"; c.lineWidth = 1.5; c.stroke(); c.restore(); }
+  // hearts and name
+  for (let i = 0; i < CONFIG.hearts; i++) { c.fillStyle = i < k.hp ? "#ff4d6d" : "#00000040"; heart(c, k.x - 12 + i * 12, k.y - r - 16, 4.5); }
+  if (name) { c.font = "700 12px system-ui, sans-serif"; c.textAlign = "center"; c.lineWidth = 3; c.strokeStyle = "#000a"; c.strokeText(name, k.x, k.y + r + 18); c.fillStyle = "#fff"; c.fillText(name, k.x, k.y + r + 18); }
+}
+function heart(c, x, y, s) { c.beginPath(); c.moveTo(x, y + s * 0.9); c.bezierCurveTo(x - s * 1.6, y - s * 0.2, x - s * 0.6, y - s * 1.4, x, y - s * 0.4); c.bezierCurveTo(x + s * 0.6, y - s * 1.4, x + s * 1.6, y - s * 0.2, x, y + s * 0.9); c.fill(); }
+const toWorld = (sx, sy) => ({ x: cam.x + (sx - W / 2) / cam.z, y: cam.y + (sy - H / 2) / cam.z }); // the camera that drew the frame
+function aimCamera(g, kids, dt) {
+  let fx = me.x, fy = me.y, z = clamp(Math.max(Math.min(W / 900, H / 620), Math.min(W / 560, H / 900)), 0.38, 1.35); // a tall phone gets a closer view that follows you
+  const team = g.tm[net.sessionId] ?? 0;
+  if (g.phase === "build" && !ATTRACT) { fx = team ? WW - 7.5 * CELL : 7.5 * CELL; fy = WH / 2; z = Math.min(W / (16 * CELL), (H - 120) / (21 * CELL)); }
+  if (g.phase === "over" || ATTRACT) {
+    z = Math.min(W / WW, H / WH) * (ATTRACT ? 1.25 : 0.95); fx = WW / 2; fy = WH / 2;
+    if (ATTRACT && g.phase === "fight") { const c = kids.filter((k) => k.st !== "f"), held = g.flags.map((f) => f.s === "held" && kids.find((k) => k.id === f.by)).filter(Boolean); const pts = held.length ? held : c; if (pts.length) { fx = pts.reduce((a, k) => a + k.x, 0) / pts.length; fy = pts.reduce((a, k) => a + k.y, 0) / pts.length; } z *= 1.55; }
+  }
+  const k = 1 - Math.pow(0.02, dt); cam.z += (z - cam.z) * k;
+  const hw = W / 2 / cam.z, hh = H / 2 / cam.z;
+  fx = hw * 2 >= WW ? WW / 2 : clamp(fx, hw, WW - hw); fy = hh * 2 >= WH ? WH / 2 : clamp(fy, hh, WH - hh);
+  cam.x += (fx - cam.x) * k; cam.y += (fy - cam.y) * k;
+}
+function draw(g, kids, dt, now) {
+  const t = now / 1000, fort = fortNow(), team = g.tm[net.sessionId];
+  aimCamera(g, kids, dt);
+  local.shake *= Math.exp(-dt * 10);
+  const sx = (Math.random() - 0.5) * local.shake, sy = (Math.random() - 0.5) * local.shake;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0); ctx.fillStyle = "#3b2a3f"; ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(DPR * cam.z, 0, 0, DPR * cam.z, DPR * (W / 2 - cam.x * cam.z + sx), DPR * (H / 2 - cam.y * cam.z + sy));
+  ctx.fillStyle = "#e9d6c4"; ctx.fillRect(-24, -24, WW + 48, WH + 48); // the walls
+  ctx.drawImage(room, 0, 0, WW, WH);
+  // where I can build (my side, glowing) during BUILD
+  if (g.phase === "build" && team !== undefined && !ATTRACT) {
+    ctx.fillStyle = TEAMS[team].color + "1c"; ctx.fillRect(team ? (GW - 13) * CELL : 0, 0, 13 * CELL, WH);
+    if (hover.c >= 0) { const hc = cellCenter(hover.c), ok = canBuild(team, hover.c) && fort[hover.c] === "."; ctx.strokeStyle = ok ? "#ffffffcc" : "#ff4d4daa"; ctx.lineWidth = 3; ctx.setLineDash([8, 6]); ctx.strokeRect(hc.x - CELL / 2 + 3, hc.y - CELL / 2 + 3, CELL - 6, CELL - 6); ctx.setLineDash([]); }
+  }
+  // cushions (plus my pending ones)
+  for (let c = 0; c < GW * GH; c++) {
+    const cu = cushionOf(fort[c]), pend = me.pending.get(c);
+    if (pend && performance.now() - pend.at > 1500) me.pending.delete(c);
+    if (cu && !(pend && pend.k === "take")) drawCushion(ctx, (c % GW) * CELL, Math.floor(c / GW) * CELL, cu.team, cu.hp, false);
+    else if (!cu && pend && pend.k === "place" && team !== undefined) drawCushion(ctx, (c % GW) * CELL, Math.floor(c / GW) * CELL, team, CONFIG.cushionHp, true);
+    if (cu && pend && pend.k === "place") me.pending.delete(c);
+  }
+  // flags at home or on the floor (carried ones ride on their carrier)
+  const carriedBy = {};
+  for (let ti = 0; ti < 2; ti++) { const f = g.flags[ti]; if (f.s === "held") carriedBy[f.by] = ti; else { const p = f.s === "home" ? BASES[ti] : f; drawFlag(ctx, p.x, p.y + 10, ti, t + ti, false); } }
+  // kids, top to bottom
+  const names = g.names || {};
+  for (const k of [...kids].sort((a, b) => a.y - b.y)) {
+    const mine = k.id === net.sessionId;
+    drawKid(ctx, k, t, mine, ATTRACT ? "" : mine ? "You" : (isBot(k.id) ? botList().find((b) => b.i === k.id)?.n : names[k.id]?.[0]) || nameOf(k.id), mine ? myCap : isBot(k.id) ? botList().find((b) => b.i === k.id)?.c || "#ccc" : S.entities.players[k.id]?.c || (names[k.id]?.[1]) || "#ccc", carriedBy[k.id]);
+  }
+  // pillows: shadow on the floor, the pillow up at its height
+  for (const p of pillows) {
+    if (p.state === "gone") continue;
+    const fade = p.state === "landed" ? Math.min(1, p.left / 0.3) : 1;
+    ctx.globalAlpha = 0.3 * fade; ctx.fillStyle = "#000"; ctx.beginPath(); ctx.ellipse(p.x, p.y + 4, 11, 6, 0, 0, 7); ctx.fill();
+    ctx.globalAlpha = fade; ctx.save(); ctx.translate(p.x, p.y - p.z); ctx.rotate(p.rot); const s = 1 + p.z / 160; ctx.scale(s, s);
+    ctx.fillStyle = "#ffffff"; rr(ctx, -12, -9, 24, 18, 7); ctx.fill(); ctx.strokeStyle = TEAMS[p.tm].color; ctx.lineWidth = 2; ctx.stroke(); ctx.restore(); ctx.globalAlpha = 1;
+  }
+  // feathers drifting down
+  for (let i = feathers.length - 1; i >= 0; i--) {
+    const f = feathers[i]; f.life -= dt; if (f.life <= 0) { feathers.splice(i, 1); continue; }
+    f.vz -= 140 * dt; f.vz = Math.max(f.vz, -30); f.z = Math.max(0, f.z + f.vz * dt); f.x += f.vx * dt; f.y += f.vy * dt; f.vx *= Math.exp(-2 * dt); f.vy *= Math.exp(-2 * dt); f.r += f.vr * dt;
+    ctx.globalAlpha = Math.min(1, f.life); ctx.save(); ctx.translate(f.x + Math.sin(t * 3 + i) * 4, f.y - f.z); ctx.rotate(f.r); ctx.fillStyle = f.color; ctx.beginPath(); ctx.ellipse(0, 0, 6, 2.5, 0, 0, 7); ctx.fill(); ctx.restore(); ctx.globalAlpha = 1;
+  }
+  for (let i = words.length - 1; i >= 0; i--) {
+    const w = words[i]; w.life -= dt; if (w.life <= 0) { words.splice(i, 1); continue; }
+    ctx.globalAlpha = Math.min(1, w.life * 2.5); ctx.font = "900 22px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.lineWidth = 5; ctx.strokeStyle = "#5a2340";
+    const y = w.y - (0.9 - w.life) * 40; ctx.strokeText(w.text, w.x, y); ctx.fillStyle = "#fff3b0"; ctx.fillText(w.text, w.x, y); ctx.globalAlpha = 1;
+  }
+  // my aim: a dotted arc to where the pillow will land
+  if (g.phase === "fight" && team !== undefined && me.st !== "f" && !ATTRACT && aim.on) {
+    const at = aim.world(), dx = at.x - me.x, dy = at.y - me.y, d = Math.hypot(dx, dy) || 1, r = Math.min(d, CONFIG.throwRange), lx = me.x + (dx / d) * r, ly = me.y + (dy / d) * r;
+    ctx.strokeStyle = "#ffffffaa"; ctx.lineWidth = 2; ctx.setLineDash([4, 7]); ctx.beginPath();
+    for (let s = 0; s <= 1.001; s += 0.1) { const px = me.x + (lx - me.x) * s, py = me.y + (ly - me.y) * s - 4 * r * CONFIG.arc * s * (1 - s) * 0.5; s ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+    ctx.stroke(); ctx.setLineDash([]); ctx.beginPath(); ctx.arc(lx, ly, 12, 0, 7); ctx.strokeStyle = me.throwReady > performance.now() ? "#ffffff55" : "#fff3b0"; ctx.lineWidth = 3; ctx.stroke();
+  }
+}
+function flagFx(m) {
+  const say = { grab: "GOT IT!", cap: "CAPTURED!", drop: "DROPPED!", back: "SAVED!" }[m.k] || "";
+  words.push({ x: m.x, y: m.y - 40, text: say, life: 1.2 }); fluff(m.x, m.y, m.k === "cap" ? 30 : 8, m.k === "cap" ? "#fff3b0" : "#ffffff");
+  sfx(m.k === "cap" ? "win" : "flag");
+}
+
+// Sounds, made on the fly with WebAudio (no files).
+let audio = null, noise = null;
+function unlockAudio() {
+  if (audio || ATTRACT) return;
+  try { audio = new AudioContext(); noise = audio.createBuffer(1, audio.sampleRate * 0.4, audio.sampleRate); const d = noise.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; } catch {}
+}
+function sfx(kind) {
+  if (!audio) return;
+  const t = audio.currentTime, gain = audio.createGain();
+  if (kind === "whoosh" || kind === "thump" || kind === "bonk" || kind === "flop") {
+    const src = audio.createBufferSource(), f = audio.createBiquadFilter(); src.buffer = noise; f.type = kind === "whoosh" ? "bandpass" : "lowpass"; f.frequency.setValueAtTime(kind === "whoosh" ? 900 : 420, t);
+    gain.gain.setValueAtTime(kind === "whoosh" ? 0.12 : 0.35, t); gain.gain.exponentialRampToValueAtTime(0.001, t + (kind === "flop" ? 0.4 : 0.2));
+    src.connect(f).connect(gain).connect(audio.destination); src.start(t); src.stop(t + 0.45); return;
+  }
+  const o = audio.createOscillator();
+  const [type, f0, f1, len, vol] = { place: ["triangle", 500, 700, 0.08, 0.1], take: ["triangle", 500, 300, 0.08, 0.08], flag: ["square", 600, 900, 0.15, 0.07], go: ["square", 780, 780, 0.3, 0.1], win: ["triangle", 520, 1040, 0.45, 0.2] }[kind] || ["sine", 440, 440, 0.1, 0.05];
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + len);
+  gain.gain.setValueAtTime(vol, t); gain.gain.exponentialRampToValueAtTime(0.001, t + len);
+  o.connect(gain).connect(audio.destination); o.start(t); o.stop(t + len + 0.02);
+}
+
+// ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
+const bigText = (html, ms) => { local.big = html; local.bigUntil = performance.now() + ms; };
+let board = null, boardFor = -1;
+const startedAt = performance.now();
+const pointsOf = (g, id) => (g.caps[id] || 0) * 5 + (g.bk[id] || 0);
+function hud(g) {
+  const now = Date.now(), team = g.tm[net.sessionId], left = Math.max(0, Math.ceil((g.endsAt - now) / 1000));
+  $("big").innerHTML = ATTRACT ? "" : performance.now() < local.bigUntil ? local.big : g.phase === "over" && performance.now() - (local.overAt || 0) < 2500 ? (g.win < 0 ? "<small>Same number of flags</small>A DRAW!" : `<small>${g.win === team ? "Your team wins!" : "Good fight!"}</small>${TEAMS[g.win].name.toUpperCase()} WIN`) : "";
+  if (ATTRACT) { $("score").innerHTML = `<b style="color:${TEAMS[0].light}">${g.score[0]}</b> – <b style="color:${TEAMS[1].light}">${g.score[1]}</b>`; $("msg").textContent = $("net").textContent = ""; return; }
+  const clock = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+  $("score").innerHTML = `<span style="color:${TEAMS[0].light}">${TEAMS[0].name}</span><i>${g.score[0]}</i><div><small>${g.phase === "build" ? "BUILD" : g.phase === "fight" ? "FIGHT" : "DONE"}</small><small>${g.phase === "over" ? "" : clock}</small></div><i>${g.score[1]}</i><span style="color:${TEAMS[1].light}">${TEAMS[1].name}</span>`;
+  const fort = fortNow(), carrying = team !== undefined && g.flags[1 - team].s === "held" && g.flags[1 - team].by === net.sessionId;
+  $("msg").innerHTML = team === undefined ? "Joining a team…"
+    : g.phase === "build" ? `You're on the <b style="color:${TEAMS[team].light}">${TEAMS[team].name}</b>! ${touchUI ? "Tap" : "Click"} your side to place a cushion (tap one to take it back) · ${Math.max(0, CONFIG.teamCushions - teamCount(fort, team))} left`
+    : carrying ? "You've got their flag! Run it home!" : me.st === "f" ? "Flopped! Back up in a moment…"
+    : g.phase === "fight" && performance.now() - startedAt < 20000 ? (touchUI ? "Left thumb moves · drag on the right and let go to throw" : "WASD to move · click to throw where you aim · grab their flag, bring it home") : "";
+  const n = livePlayers().length;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : dropped ? "Reconnecting…" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the fort and flags" : ""}`;
+  $("over").hidden = !(g.phase === "over" && performance.now() - (local.overAt || 0) > 2500);
+  if (g.phase === "over") results(g, now);
+}
+function results(g, now) {
+  const team = g.tm[net.sessionId];
+  $("title").textContent = g.win < 0 ? "A draw! 🛌" : g.win === team ? `${TEAMS[g.win].name} win! You win! 🏆` : `${TEAMS[g.win].name} win! 🏆`;
+  const names = g.names || {}, kids = [...Object.keys(g.tm), ...botList().map((b) => b.i)];
+  const nm = (id) => (id === net.sessionId ? "You" : isBot(id) ? botList().find((b) => b.i === id)?.n || "Bot" : names[id]?.[0] || "Player");
+  $("results").innerHTML = kids.sort((a, b) => pointsOf(g, b) - pointsOf(g, a)).slice(0, 10).map((id) => `<li class="${id === net.sessionId ? "me" : ""}"><b style="color:${TEAMS[teamOf(g, id)]?.light || "#fff"}">●</b> ${esc(nm(id))}<span>${g.caps[id] || 0} 🚩 · ${g.bk[id] || 0} bonks</span></li>`).join("");
+  $("next").textContent = `Next match in ${Math.max(0, Math.ceil((g.endsAt - now) / 1000))}s`;
+  if (boardFor !== g.id) { boardFor = g.id; showBoard(pointsOf(g, net.sessionId)); }
+}
+function showBoard(points) {
+  const list = $("board");
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li>Loading…</li>";
+  (points > 0 ? board.submit(points).catch(() => null) : Promise.resolve()).then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No points yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+$("again").onclick = () => { const g = game(); if (!g || g.phase !== "over") return; if (isHost()) playAgain(g); else net.send("again", {}); $("over").hidden = true; };
+const playAgain = (g) => { if (g.phase === "over") writeGame({ ...g, endsAt: Math.min(g.endsAt, Date.now() + 1200) }); };
+/** Two players picked the same cap color at once: the later sessionId picks again (bots' colors count too). */
+function fixColor() {
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId), botCaps = botList().map((b) => b.c);
+  if (!others.some(([id, p]) => p.c === myCap && id < net.sessionId) && !botCaps.includes(myCap)) return;
+  const taken = new Set([...others.map(([, p]) => p.c), ...botCaps]);
+  myCap = CAPS.find((c) => !taken.has(c)) || myCap; net.me.set("c", myCap);
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+// Keyboard moves; the mouse aims (from the camera, so every edge of the room works) and a click throws.
+// Touch: a floating stick on the left half moves; on the right half, drag to aim and let go to throw.
+// In BUILD a click or tap on a cell places (or takes back) a cushion.
+const touchUI = matchMedia("(pointer: coarse)").matches && !ATTRACT;
+const keys = new Set(), stick = { id: -1, x: 0, y: 0, mx: 0, my: 0 }, hover = { c: -1 };
+const aim = { on: false, sx: 0, sy: 0, id: -1, world: () => toWorld(aim.sx, aim.sy) };
+let throwQueued = null;
+addEventListener("keydown", (e) => { unlockAudio(); keys.add(e.key.toLowerCase()); if (e.key === " ") { e.preventDefault(); if (aim.on) throwQueued = aim.world(); } });
+addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+function readInput() {
+  const k = (a, b) => (keys.has(a) || keys.has(b) ? 1 : 0);
+  const out = { mx: k("d", "arrowright") - k("a", "arrowleft") + stick.mx, my: k("s", "arrowdown") - k("w", "arrowup") + stick.my, aimAt: aim.on ? aim.world() : null, throwAt: throwQueued };
+  throwQueued = null; return out;
+}
+cv.addEventListener("contextmenu", (e) => e.preventDefault());
+cv.addEventListener("pointerdown", (e) => {
+  unlockAudio(); e.preventDefault();
+  const g = game(); if (!g) return;
+  if (g.phase === "build") { const w = toWorld(e.clientX, e.clientY), c = cellOf(w.x, w.y), team = g.tm[net.sessionId]; if (c < 0 || team === undefined) return; const fort = fortNow(); if (FORT_CH[team].includes(fort[c])) requestBuild("take", c); else if (canBuild(team, c) && fort[c] === ".") requestBuild("place", c); return; }
+  if (e.pointerType === "mouse") { aim.on = true; aim.sx = e.clientX; aim.sy = e.clientY; throwQueued = aim.world(); return; }
+  if (e.clientX < W / 2 && stick.id < 0) {
+    cv.setPointerCapture(e.pointerId); Object.assign(stick, { id: e.pointerId, x: e.clientX, y: e.clientY, mx: 0, my: 0 });
+    Object.assign($("stick").style, { left: e.clientX + "px", top: e.clientY + "px" }); $("stick").hidden = false;
+  } else if (aim.id < 0) { cv.setPointerCapture(e.pointerId); Object.assign(aim, { id: e.pointerId, on: true, sx: e.clientX, sy: e.clientY }); }
+});
+cv.addEventListener("pointermove", (e) => {
+  if (e.pointerType === "mouse") { aim.on = true; aim.sx = e.clientX; aim.sy = e.clientY; const w = toWorld(e.clientX, e.clientY); hover.c = cellOf(w.x, w.y); return; }
+  if (e.pointerId === stick.id) { const dx = e.clientX - stick.x, dy = e.clientY - stick.y, d = Math.hypot(dx, dy), k = Math.min(1, d / 50) / (d || 1); stick.mx = dx * k; stick.my = dy * k; $("stick").firstElementChild.style.transform = `translate(${stick.mx * 35}px, ${stick.my * 35}px)`; }
+  if (e.pointerId === aim.id) { aim.sx = e.clientX; aim.sy = e.clientY; }
+});
+for (const ev of ["pointerup", "pointercancel"]) cv.addEventListener(ev, (e) => {
+  if (e.pointerId === stick.id) { Object.assign(stick, { id: -1, mx: 0, my: 0 }); $("stick").hidden = true; }
+  if (e.pointerId === aim.id) { if (ev === "pointerup") throwQueued = aim.world(); aim.id = -1; aim.on = false; }
+});
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let last = performance.now(), lastHb = 0, lastHud = 0;
+function frame(now) {
+  requestAnimationFrame(frame);
+  const t0 = performance.now(); // not `now`: the first frame after a freeze can be stamped from before it ended
+  if (frameAt && t0 - frameAt > 1000) { wokeAt = t0; host.wasHost = false; host.last = null; } // woke from a stall: drop my host copy, adopt state again (see isHost)
+  frameAt = t0;
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now;
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
+  if (S.shared.bots !== botsSeen.raw) botsSeen = { raw: S.shared.bots, at: t0 };
+  let g = game();
+  if (g && (g.id !== local.gid || g.phase !== local.phase)) onPhase(g);
+  if (isHost()) hostTick(dt, t0); else host.wasHost = false;
+  g = game();
+  if (!g) return;
+  stepPillows(dt, fortNow());
+  myTick(dt, g, t0);
+  const kids = everyone(g);
+  draw(g, kids, dt, now);
+  if (now - lastHud > 100) { lastHud = now; hud(g); }
+}
+
+(async function start() {
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.on("throw", (m) => { if (m && typeof m === "object" && typeof m.x === "number") spawnPillow(m); });
+  net.on("hit", (m) => { if (m && typeof m === "object") bonkFx(m); });
+  net.on("flag", (m) => { if (m && typeof m === "object") flagFx(m); });
+  net.on("build", (m, from) => { if (isHost()) applyBuild(from, m); });
+  net.on("again", () => { const g = game(); if (isHost() && g) playAgain(g); });
+  net.onDisconnect(() => { dropped = true; $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { dropped = false; });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...parse(S.shared.bots, []).map((b) => b.c)]);
+  myCap = CAPS.find((c) => !taken.has(c)) || CAPS[Math.floor(Math.random() * CAPS.length)];
+  net.me.set({ n: myName, c: myCap, hb: Date.now() });
+  if (ATTRACT) Object.assign(CONFIG, { seats: 8, buildMs: 1500, overMs: 2500, capsToWin: 99, botThrowCd: [0.45, 0.9] });
+  if (new URLSearchParams(location.search).has("test")) window.__test = { game, me: () => me, kids: () => everyone(game()), fort: () => fortNow(), sid: () => net.sessionId, isHost, bots: () => [...host.bots.values()], pillows: () => pillows, config: CONFIG };
+  if (new URLSearchParams(location.search).has("test")) Object.assign(window, { __camx: () => cam.x, __camy: () => cam.y, __camz: () => cam.z });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

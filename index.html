@@ -60,6 +60,7 @@
  *   PILLOWS ....... thrown pillows flying in an arc, forts stopping them, getting hit
  *   MATCH (HOST) .. phases, teams, seats, building, flags, captures, cushion damage. Only the host writes these.
  *   BOTS (HOST) ... building their fort, then attackers go for the flag, defenders guard it, everyone throws
+ *                   (and bonks a hole in a fort that walls its flag in)
  *   ME ............ moving, throwing, getting bonked. Each player writes only its own.
  *   DRAW .......... camera, the room, cushions, flags, kids in pajamas, pillows, feathers
  *   HUD & RESULTS . score, timer, hints, results card, leaderboard
@@ -115,6 +116,7 @@ const CONFIG = {
   dropReturnMs: 10000,   // a dropped flag goes home after this long
   botThrowCd: [0.75, 1.4], // bots wait this long between throws (s)
   botAim: 50,            // how far off a bot's aim can be (px)
+  wallFoeRange: 260,     // a bot walled out of the flag bonks the cushions, unless an enemy is closer than this (px)
   board: "pillow-points",
 };
 const TEAMS = [
@@ -451,7 +453,7 @@ function botBrain(b, g, kids, now) {
   else if (fl[enemy].s === "held") goal = { x: WW / 2 + (b.team ? 1 : -1) * 120, y: WH / 2 + b.wander * 250 };
   else goal = flagAt(g, enemy, kids);
   // walk: straight if nothing's in the way, else follow a grid path (recomputed a few times a second)
-  if (now > b.pathAt) { b.pathAt = now + 350; b.path = findPath(cellOf(b.x, b.y), cellOf(goal.x, goal.y), host.fort); }
+  if (now > b.pathAt) { b.pathAt = now + 350; b.goalCell = cellOf(goal.x, goal.y); b.path = findPath(cellOf(b.x, b.y), b.goalCell, host.fort); }
   let tx = goal.x, ty = goal.y;
   while (b.path.length > 1 && dist(cellCenter(b.path[0]), b) < CELL * 0.7) b.path.shift();
   if (b.path.length > 1) { const w = cellCenter(b.path[Math.min(1, b.path.length - 1)]); tx = w.x; ty = w.y; }
@@ -459,27 +461,44 @@ function botBrain(b, g, kids, now) {
   const out = { mx: (dx / d) * slow, my: (dy / d) * slow };
   // throw at the nearest enemy in range, leading them a little
   const foes = kids.filter((k) => k.team !== b.team && k.st !== "f").map((k) => [k, dist(k, b)]).filter(([, d2]) => d2 < CONFIG.throwRange * 0.9).sort((a, c) => a[1] - c[1]);
-  if (foes.length && now > (b.nextThrow || 0)) {
-    const [k, d2] = foes[0], lead = d2 / CONFIG.throwSpeed, err = CONFIG.botAim * b.aimErr;
-    out.throwAt = { x: k.x + (k.vx || 0) * lead + rnd(-err, err), y: k.y + (k.vy || 0) * lead + rnd(-err, err) };
+  // no way through (their fort shuts the flag in): bonk a hole in the cushion of theirs that's in the way
+  const wall = b.path.length && b.path[b.path.length - 1] !== b.goalCell ? cushionInTheWay(b, goal) : null;
+  if (now > (b.nextThrow || 0) && (foes.length || wall)) {
+    if (foes.length && !(wall && foes[0][1] > CONFIG.wallFoeRange)) {
+      const [k, d2] = foes[0], lead = d2 / CONFIG.throwSpeed, err = CONFIG.botAim * b.aimErr;
+      out.throwAt = { x: k.x + (k.vx || 0) * lead + rnd(-err, err), y: k.y + (k.vy || 0) * lead + rnd(-err, err) };
+    } else { const p = cellCenter(wall); out.throwAt = { x: p.x + rnd(-8, 8), y: p.y + rnd(-8, 8) }; }
     b.nextThrow = now + rnd(...CONFIG.botThrowCd) * 1000;
   }
   return out;
 }
-/** Breadth-first path on the grid from cell a to cell b around furniture and cushions (cells, start first). */
+/** The other team's cushion (a cell) within throwing range that lies most nearly on the way from bot b to goal, or null. */
+function cushionInTheWay(b, goal) {
+  let best = null, bestD = Infinity;
+  for (let c = 0; c < GW * GH; c++) {
+    const cu = cushionOf(host.fort[c]); if (!cu || cu.team === b.team) continue;
+    const p = cellCenter(c), d = dist(p, b); if (d > CONFIG.throwRange * 0.85) continue;
+    const score = d + dist(p, goal); if (score < bestD) { bestD = score; best = c; }
+  }
+  return best;
+}
+/** Breadth-first path on the grid from cell a to cell b around furniture and cushions (cells, start first).
+ *  If forts shut b in, the path goes as close to it as they allow (so it doesn't end at b). */
 function findPath(a, goal, fort) {
   if (a < 0 || goal < 0) return [];
   const prev = new Int16Array(GW * GH).fill(-1), q = [a]; prev[a] = a;
+  let closest = a, closestD = Infinity;
   for (let qi = 0; qi < q.length; qi++) {
     const c = q[qi]; if (c === goal) break;
-    const x = c % GW, y = (c - x) / GW;
+    const x = c % GW, y = (c - x) / GW, d = Math.hypot(x - (goal % GW), y - Math.floor(goal / GW));
+    if (d < closestD) { closestD = d; closest = c; }
     for (const [nx, ny] of [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]]) {
       if (nx < 0 || ny < 0 || nx >= GW || ny >= GH) continue;
       const n = ny * GW + nx; if (prev[n] >= 0 || (blocked(n, fort) && n !== goal)) continue;
       prev[n] = c; q.push(n);
     }
   }
-  if (prev[goal] < 0) return [];
+  if (prev[goal] < 0) goal = closest;
   const path = []; for (let c = goal; c !== a; c = prev[c]) path.push(c); path.push(a);
   return path.reverse();
 }
@@ -758,7 +777,6 @@ function sfx(kind) {
 // ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
 const bigText = (html, ms) => { local.big = html; local.bigUntil = performance.now() + ms; };
 let board = null, boardFor = -1;
-const startedAt = performance.now();
 const pointsOf = (g, id) => (g.caps[id] || 0) * 5 + (g.bk[id] || 0);
 function hud(g) {
   const now = Date.now(), team = g.tm[net.sessionId], left = Math.max(0, Math.ceil((g.endsAt - now) / 1000));
@@ -770,7 +788,7 @@ function hud(g) {
   $("msg").innerHTML = team === undefined ? "Joining a team…"
     : g.phase === "build" ? `You're on the <b style="color:${TEAMS[team].light}">${TEAMS[team].name}</b>! ${touchUI ? "Tap" : "Click"} your side to place a cushion (tap one to take it back) · ${Math.max(0, CONFIG.teamCushions - teamCount(fort, team))} left`
     : carrying ? "You've got their flag! Run it home!" : me.st === "f" ? "Flopped! Back up in a moment…"
-    : g.phase === "fight" && performance.now() - startedAt < 20000 ? (touchUI ? "Left thumb moves · drag on the right and let go to throw" : "WASD to move · click to throw where you aim · grab their flag, bring it home") : "";
+    : g.phase === "fight" && CONFIG.fightMs - (g.endsAt - now) < 15000 ? (touchUI ? "Left thumb moves · drag on the right and let go to throw" : "WASD to move · click to throw where you aim · grab their flag, bring it home") : "";
   const n = livePlayers().length;
   $("net").textContent = net.offline ? "Offline: playing with bots" : dropped ? "Reconnecting…" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the fort and flags" : ""}`;
   $("over").hidden = !(g.phase === "over" && performance.now() - (local.overAt || 0) > 2500);
@@ -813,6 +831,7 @@ const aim = { on: false, sx: 0, sy: 0, id: -1, world: () => toWorld(aim.sx, aim.
 let throwQueued = null;
 addEventListener("keydown", (e) => { unlockAudio(); keys.add(e.key.toLowerCase()); if (e.key === " ") { e.preventDefault(); if (aim.on) throwQueued = aim.world(); } });
 addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+addEventListener("blur", () => keys.clear()); // a key let go in another window never sends keyup here
 function readInput() {
   const k = (a, b) => (keys.has(a) || keys.has(b) ? 1 : 0);
   const out = { mx: k("d", "arrowright") - k("a", "arrowleft") + stick.mx, my: k("s", "arrowdown") - k("w", "arrowup") + stick.my, aimAt: aim.on ? aim.world() : null, throwAt: throwQueued };
